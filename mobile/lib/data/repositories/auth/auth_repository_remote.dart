@@ -1,0 +1,62 @@
+import 'package:dio/dio.dart';
+import 'package:mobile/core/exceptions/app_exception.dart';
+import 'package:mobile/core/result.dart';
+import 'package:mobile/data/repositories/auth/auth_repository.dart';
+import 'package:mobile/data/services/api/auth_api.dart';
+import 'package:mobile/data/services/api/mappers/auth_session_api_model_mapper.dart';
+import 'package:mobile/data/services/api/mappers/dio_exception_mapper.dart';
+import 'package:mobile/data/services/api/model/login/login_request.dart';
+import 'package:mobile/data/services/api/model/user/register_user_request.dart';
+import 'package:mobile/domain/models/auth_session.dart';
+
+class AuthRepositoryRemote({required final AuthApi _authApi})
+    implements AuthRepository {
+  @override
+  Future<Result<AuthSession>> login({
+    required String email,
+    required String password,
+  }) async {
+    try {
+      final session = await _authApi.login(
+        LoginRequest(email: email, password: password),
+      );
+
+      return Result.ok(session.toDomain());
+    } on DioException catch (e, st) {
+      if (e.response?.statusCode == 401) {
+        return Result.error(
+          InvalidCredentialsException(cause: e, stackTrace: st),
+        );
+      }
+      return Result.error(e.toAppException(st));
+    }
+  }
+
+  @override
+  Future<Result<void>> register({
+    required String name,
+    required String email,
+    required String password,
+    required List<String> favoriteTeams,
+    required bool acceptedTerms,
+  }) async {
+    try {
+      await _authApi.register(
+        RegisterUserRequest(
+          name: name,
+          email: email,
+          password: password,
+          favoriteTeams: favoriteTeams,
+          acceptedTerms: acceptedTerms,
+        ),
+      );
+      return Result.done;
+    } on DioException catch (e, st) {
+      if (e.response?.statusCode == 409) {
+        return Result.error(EmailAlreadyInUseException());
+      }
+
+      return Result.error(e.toAppException(st));
+    }
+  }
+}

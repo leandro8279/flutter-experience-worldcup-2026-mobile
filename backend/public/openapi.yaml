@@ -1,0 +1,1114 @@
+openapi: 3.0.3
+
+info:
+  title: WC 2026 API — Álbum de Figurinhas da Copa
+  version: 1.0.0
+  description: |
+    API do álbum de figurinhas da Copa do Mundo de 2026, construída com
+    Dart Frog.
+
+    ## Autenticação
+
+    Tudo sob `/v1` passa por uma fronteira **fail-closed**: bearer JWT com
+    allowlist _default-deny_. Somente `POST /v1/auth/login`, `POST /v1/users`
+    e `GET /v1/teams` são públicas; qualquer outra rota `/v1` exige o header
+    `Authorization: Bearer <token>`.
+
+    O token é um JWT HS256 stateless com validade de **24 horas**, emitido por
+    `POST /v1/auth/login`. O claim `sub` carrega o id do usuário.
+
+    Quando o middleware rejeita a requisição, a resposta é `401` **sem corpo**.
+    Já os erros de domínio dos handlers respondem `401`/`400`/`404`/`409` com
+    corpo JSON `{ "message": "..." }`.
+
+    ## Convenções
+
+    - Todas as respostas com corpo usam `application/json`, exceto `GET /`
+      (texto simples) e os arquivos estáticos de bandeira (`image/png`).
+    - Métodos HTTP não suportados por uma rota respondem `405` sem corpo.
+    - Erros inesperados respondem `500` com `{ "message": "Erro interno." }`.
+
+    ## Códigos de figurinha
+
+    - Seleções: `<CODE>-<1..20>` — ex.: `BRA-1`, `ARG-20`. 48 seleções × 20 =
+      960 figurinhas.
+    - Especiais (avulsas, sem seleção): `00` e `FWC-1`..`FWC-19` — 20
+      figurinhas.
+    - Total do álbum: **980** posições.
+
+servers:
+  - url: http://localhost:8080
+    description: Ambiente local (`make dev` / `dart_frog dev`)
+
+tags:
+  - name: Sistema
+    description: Rotas utilitárias, públicas e sem versionamento.
+  - name: Autenticação
+    description: Emissão de token JWT.
+  - name: Usuários
+    description: Cadastro e perfil do usuário.
+  - name: Seleções
+    description: Catálogo de seleções da Copa.
+  - name: Álbum
+    description: Consulta do álbum e registro de figurinhas.
+  - name: Estáticos
+    description: Arquivos servidos da pasta `public/`.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /:
+    get:
+      tags: [Sistema]
+      summary: Mensagem de boas-vindas
+      description: |
+        Raiz da aplicação. Responde a **qualquer** método HTTP com o mesmo
+        texto simples.
+      operationId: getRoot
+      security: []
+      responses:
+        '200':
+          description: Texto de boas-vindas.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Welcome to Dart Frog!
+
+  /health:
+    get:
+      tags: [Sistema]
+      summary: Health-check da aplicação
+      description: |
+        Endpoint público de readiness. Responde a **qualquer** método HTTP.
+
+        Nunca retorna `5xx` por indisponibilidade do banco: a falha é
+        representada como `status: degraded` + `database: down`, sempre com
+        HTTP `200`.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Estado atual da aplicação.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                saudavel:
+                  summary: Banco disponível
+                  value:
+                    status: ok
+                    uptime: 12
+                    version: 1.0.0
+                    database: up
+                degradado:
+                  summary: Banco indisponível
+                  value:
+                    status: degraded
+                    uptime: 3487
+                    version: 1.0.0
+                    database: down
+
+  /v1/auth/login:
+    post:
+      tags: [Autenticação]
+      summary: Autentica por email e senha
+      description: |
+        Valida as credenciais e emite um JWT HS256 com validade de 24 horas.
+
+        Junto do token, a resposta traz os dados básicos do usuário
+        autenticado (`name`, `email`), dispensando uma chamada extra a
+        `GET /v1/users/me` só para exibir o nome logo após o login.
+
+        A resposta de falha é genérica (`Credenciais inválidas.`) tanto para
+        email inexistente quanto para senha errada — proteção contra
+        enumeração de usuários.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: joao@example.com
+              password: senhaSuperSecreta
+      responses:
+        '200':
+          description: Token emitido e dados do usuário autenticado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Credenciais inválidas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              example:
+                message: Credenciais inválidas.
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/users:
+    post:
+      tags: [Usuários]
+      summary: Cadastra um usuário
+      description: |
+        Cria a conta com as seleções favoritas escolhidas. Códigos duplicados
+        em `favorite_teams` são deduplicados antes da persistência.
+
+        Regras de validação aplicadas antes de tocar o banco:
+
+        - `name`: texto obrigatório, não vazio (com `trim`).
+        - `email`: texto obrigatório, normalizado para minúsculas com `trim`;
+          precisa ter parte local não vazia e domínio com ponto.
+        - `password`: texto obrigatório, entre **8 e 72 bytes** (o teto é o
+          limite do bcrypt).
+        - `favorite_teams`: lista de códigos de seleção, ao menos um; todos
+          precisam existir no catálogo (`GET /v1/teams`).
+        - `accepted_terms`: booleano obrigatório e precisa ser `true`.
+      operationId: registerUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterUserRequest'
+            example:
+              name: João da Silva
+              email: joao@example.com
+              password: senhaSuperSecreta
+              favorite_teams: [BRA, ARG]
+              accepted_terms: true
+      responses:
+        '201':
+          description: Usuário criado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterUserResponse'
+        '400':
+          description: |
+            Corpo inválido (JSON malformado, não-objeto) ou violação de
+            validação — inclui código de seleção inexistente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              examples:
+                senhaCurta:
+                  value:
+                    message: password deve ter no mínimo 8 caracteres
+                selecaoInvalida:
+                  value:
+                    message: Seleção inválida.
+                jsonInvalido:
+                  value:
+                    message: JSON inválido.
+        '409':
+          description: Email já cadastrado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              example:
+                message: Email já está em uso.
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/users/me:
+    get:
+      tags: [Usuários]
+      summary: Perfil do usuário autenticado
+      description: |
+        Retorna o perfil do dono do token, com as seleções favoritas
+        completas (código, nome e bandeira).
+      operationId: getMe
+      responses:
+        '200':
+          description: Perfil carregado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Perfil não encontrado para o id do token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              example:
+                message: Usuário não encontrado.
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/teams:
+    get:
+      tags: [Seleções]
+      summary: Lista o catálogo de seleções
+      description: |
+        Catálogo completo das 48 seleções da Copa, ordenado alfabeticamente
+        pelo nome. Rota pública — é a fonte dos códigos aceitos em
+        `favorite_teams` no cadastro.
+
+        `flag_url` é um caminho relativo servido pela própria API
+        (`/flags/<code>.png`); o cliente prefixa o host. `primary_color` é a
+        cor base da seleção em `#RRGGBB`, para o cliente pintar card/tema.
+      operationId: listTeams
+      security: []
+      responses:
+        '200':
+          description: Lista de seleções.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Team'
+              example:
+                - code: ALG
+                  name: Algeria
+                  flag_url: /flags/alg.png
+                  primary_color: '#007A3D'
+                - code: ARG
+                  name: Argentina
+                  flag_url: /flags/arg.png
+                  primary_color: '#6CACE4'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/album:
+    get:
+      tags: [Álbum]
+      summary: Consulta o álbum do usuário
+      description: |
+        Retorna **todas** as posições do álbum do usuário autenticado —
+        coladas, repetidas e vazias — agrupadas por seleção em `teams` e com
+        as especiais avulsas em `loose`.
+
+        Os grupos de `teams` vêm ordenados pelo nome da seleção.
+
+        Os filtros `status` e `team` são combináveis (AND).
+      operationId: getAlbum
+      parameters:
+        - $ref: '#/components/parameters/AlbumStatus'
+        - $ref: '#/components/parameters/AlbumTeam'
+      responses:
+        '200':
+          description: Álbum do usuário.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlbumResponse'
+              example:
+                teams:
+                  - team:
+                      code: ARG
+                      name: Argentina
+                      flag_url: /flags/arg.png
+                      primary_color: '#6CACE4'
+                    stickers:
+                      - code: ARG-1
+                        number: 1
+                        status: owned
+                        repeated: 0
+                      - code: ARG-2
+                        number: 2
+                        status: missing
+                        repeated: 0
+                  - team:
+                      code: BRA
+                      name: Brazil
+                      flag_url: /flags/bra.png
+                      primary_color: '#FFDF00'
+                    stickers:
+                      - code: BRA-1
+                        number: 1
+                        status: repeated
+                        repeated: 2
+                loose:
+                  - code: '00'
+                    number: 0
+                    status: owned
+                    repeated: 0
+        '400':
+          description: Valor de `status` fora do domínio aceito.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              example:
+                message: 'status inválido: coladas'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/album/stickers:
+    post:
+      tags: [Álbum]
+      summary: Registra (cola) figurinhas no álbum
+      description: |
+        Soma `quantity` à quantidade que o usuário possui da figurinha
+        `code`. É acumulativo: chamar duas vezes com `quantity: 1` deixa a
+        figurinha com quantidade 2, ou seja, `status: repeated` e
+        `repeated: 1`.
+
+        O carimbo de "colada em" (`stuck_at`, exposto em
+        `GET /v1/album/recent`) é gravado apenas na **primeira** colagem e não
+        é reescrito pelas repetidas.
+      operationId: registerSticker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterStickerRequest'
+            example:
+              code: BRA-1
+              quantity: 1
+      responses:
+        '201':
+          description: Figurinha registrada; devolve a posição resultante.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterStickerResponse'
+              examples:
+                primeiraColagem:
+                  summary: Primeira colagem
+                  value:
+                    code: BRA-1
+                    status: owned
+                    repeated: 0
+                repetida:
+                  summary: Já possuía a figurinha
+                  value:
+                    code: BRA-1
+                    status: repeated
+                    repeated: 1
+        '400':
+          description: |
+            Corpo inválido, `quantity` menor que 1 ou `code` inexistente no
+            catálogo de figurinhas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              examples:
+                figurinhaInexistente:
+                  value:
+                    message: figurinha inválida
+                quantidadeInvalida:
+                  value:
+                    message: quantity deve ser maior ou igual a 1
+                jsonInvalido:
+                  value:
+                    message: Requisição inválida.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [Álbum]
+      summary: Define a quantidade que o usuário possui de uma figurinha
+      description: |
+        Substitui a quantidade da figurinha `code` pelo valor absoluto
+        enviado em `quantity` — ao contrário do `POST`, **não** soma ao que
+        já existia: uma figurinha com quantidade 4 que recebe
+        `quantity: 2` passa a ter quantidade 2.
+
+        `quantity: 0` remove a figurinha do álbum: a linha é apagada e a
+        posição volta a `status: missing`.
+
+        Só atualiza figurinha que o usuário já possui — quando ela ainda não
+        foi colada, responde `404` sem criar nada (criar é papel do `POST`).
+
+        O carimbo de "colada em" (`stuck_at`, exposto em
+        `GET /v1/album/recent`) não é reescrito pelo update.
+      operationId: updateStickerQuantity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateStickerRequest'
+            example:
+              code: BRA-1
+              quantity: 2
+      responses:
+        '200':
+          description: Quantidade atualizada; devolve a posição resultante.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateStickerResponse'
+              examples:
+                quantidadeDefinida:
+                  summary: Quantidade redefinida para 2
+                  value:
+                    code: BRA-1
+                    status: repeated
+                    repeated: 1
+                removida:
+                  summary: quantity 0 remove a figurinha do álbum
+                  value:
+                    code: BRA-1
+                    status: missing
+                    repeated: 0
+        '400':
+          description: |
+            Corpo inválido, `quantity` menor que 0 ou `code` inexistente no
+            catálogo de figurinhas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              examples:
+                figurinhaInexistente:
+                  value:
+                    message: figurinha inválida
+                quantidadeInvalida:
+                  value:
+                    message: quantity deve ser maior ou igual a 0
+                jsonInvalido:
+                  value:
+                    message: Requisição inválida.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: |
+            O usuário ainda não possui essa figurinha no álbum — o update não
+            cria posição nova.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              example:
+                message: figurinha não cadastrada no álbum do usuário
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/album/stickers/{code}:
+    delete:
+      tags: [Álbum]
+      summary: Remove uma figurinha do álbum
+      description: |
+        Apaga a posição inteira do álbum do usuário, seja qual for a
+        quantidade — equivale a `PUT /v1/album/stickers` com
+        `quantity: 0`, mas identificando a figurinha pela URL e sem corpo.
+
+        **Idempotente**: o estado final é sempre "figurinha fora do álbum".
+        Remover uma figurinha que o usuário não possui (ou repetir o DELETE)
+        também responde `204` — nunca `404`. Só o código fora do catálogo é
+        erro (`400`).
+      operationId: removeSticker
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: |
+            Código da figurinha. Aceita caixa baixa e zeros à esquerda no
+            sufixo numérico (`bra-001` alcança `BRA-1`).
+          schema:
+            type: string
+            minLength: 1
+          example: BRA-1
+      responses:
+        '204':
+          description: |
+            Figurinha fora do álbum. Sem corpo — responde igual tendo
+            removido a posição ou não havendo nada a remover.
+        '400':
+          description: '`code` inexistente no catálogo de figurinhas.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorMessage'
+              example:
+                message: figurinha inválida
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/album/summary:
+    get:
+      tags: [Álbum]
+      summary: Resumo numérico do álbum
+      description: |
+        Contadores agregados do álbum do usuário autenticado.
+
+        - `total`: tamanho fixo do álbum (980 posições).
+        - `missing`: posições que o usuário ainda não possui.
+        - `repeated`: soma das unidades excedentes (`quantity - 1`) de todas
+          as figurinhas com quantidade ≥ 2.
+      operationId: getAlbumSummary
+      responses:
+        '200':
+          description: Resumo do álbum.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlbumSummary'
+              example:
+                total: 980
+                missing: 942
+                repeated: 7
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/album/recent:
+    get:
+      tags: [Álbum]
+      summary: Últimas figurinhas coladas
+      description: |
+        As **10** figurinhas coladas mais recentemente pelo usuário, da mais
+        nova para a mais antiga (`stuck_at` decrescente, desempate pelo id da
+        figurinha decrescente). O limite é fixo — não há paginação.
+
+        Diferente das posições em `GET /v1/album`, cada item traz a seleção
+        dona embutida em `team`, que é `null` nas figurinhas especiais.
+      operationId: getRecentStickers
+      responses:
+        '200':
+          description: Figurinhas recentes (lista vazia se nenhuma colada).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecentStickersResponse'
+              example:
+                stickers:
+                  - code: BRA-1
+                    number: 1
+                    status: repeated
+                    repeated: 1
+                    stuck_at: '2026-08-31T14:03:27.512Z'
+                    team:
+                      code: BRA
+                      name: Brazil
+                      flag_url: /flags/bra.png
+                      primary_color: '#FFDF00'
+                  - code: FWC-3
+                    number: 3
+                    status: owned
+                    repeated: 0
+                    stuck_at: '2026-08-30T09:12:44.100Z'
+                    team: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /flags/{file}:
+    get:
+      tags: [Estáticos]
+      summary: Bandeira de uma seleção
+      description: |
+        Arquivo estático servido da pasta `public/flags`. É o alvo do
+        `flag_url` devolvido em `GET /v1/teams`, `GET /v1/users/me` e nos
+        grupos de `GET /v1/album`.
+      operationId: getFlag
+      security: []
+      parameters:
+        - name: file
+          in: path
+          required: true
+          description: Nome do arquivo, no formato `<code minúsculo>.png`.
+          schema:
+            type: string
+          example: bra.png
+      responses:
+        '200':
+          description: Imagem PNG da bandeira.
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Arquivo inexistente.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT HS256 emitido por `POST /v1/auth/login`, válido por 24 horas.
+        Envie no header `Authorization: Bearer <token>`.
+
+  parameters:
+    AlbumStatus:
+      name: status
+      in: query
+      required: false
+      description: |
+        Recorta o álbum por estado da posição. Omitido, devolve o álbum
+        inteiro. Qualquer valor fora do enum resulta em `400`.
+
+        - `missing`: apenas posições que o usuário não possui.
+        - `owned`: tudo que o usuário possui — quantidade ≥ 1, incluindo as
+          repetidas.
+        - `repeated`: apenas posições com quantidade ≥ 2.
+      schema:
+        type: string
+        enum: [missing, owned, repeated]
+      example: missing
+
+    AlbumTeam:
+      name: team
+      in: query
+      required: false
+      description: |
+        Filtra por **prefixo** do código da figurinha, sem diferenciar
+        maiúsculas de minúsculas (`bra` casa com `BRA-1`..`BRA-20`; `FWC`
+        casa com as especiais). Espaços nas pontas são ignorados; valor
+        vazio ou só espaços é tratado como ausente.
+      schema:
+        type: string
+      example: BRA
+
+  responses:
+    BadRequest:
+      description: Requisição inválida (JSON malformado ou validação).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorMessage'
+          example:
+            message: JSON inválido.
+
+    Unauthorized:
+      description: |
+        Token ausente, malformado, com assinatura inválida ou expirado.
+        Rejeição do middleware de autenticação — resposta **sem corpo**.
+
+    MethodNotAllowed:
+      description: Método HTTP não suportado por esta rota. Sem corpo.
+
+    InternalError:
+      description: Falha inesperada no servidor.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorMessage'
+          example:
+            message: Erro interno.
+
+  schemas:
+    ErrorMessage:
+      type: object
+      description: Formato único de erro de domínio da API.
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Mensagem legível descrevendo a falha.
+          example: Erro interno.
+
+    Health:
+      type: object
+      required: [status, uptime, version, database]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: '`degraded` quando o banco não responde.'
+        uptime:
+          type: integer
+          format: int32
+          description: Segundos desde a inicialização do processo.
+          example: 12
+        version:
+          type: string
+          description: Versão da aplicação.
+          example: 1.0.0
+        database:
+          type: string
+          enum: [up, down]
+          description: Resultado do readiness check do SQLite.
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          description: Normalizado para minúsculas, com `trim`.
+          example: joao@example.com
+        password:
+          type: string
+          format: password
+          description: Enviada em texto puro; comparada contra o hash bcrypt.
+          example: senhaSuperSecreta
+
+    LoginResponse:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+          description: JWT HS256 válido por 24 horas.
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3NzI0.sig
+        user:
+          $ref: '#/components/schemas/LoginUser'
+
+    LoginUser:
+      type: object
+      description: |
+        Identificação do usuário autenticado. É um subconjunto do perfil de
+        `GET /v1/users/me` — o `id` fica só no claim `sub` do token.
+      required: [name, email]
+      properties:
+        name:
+          type: string
+          example: João da Silva
+        email:
+          type: string
+          format: email
+          example: joao@example.com
+
+    RegisterUserRequest:
+      type: object
+      required: [name, email, password, favorite_teams, accepted_terms]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Nome do usuário; espaços nas pontas são removidos.
+          example: João da Silva
+        email:
+          type: string
+          format: email
+          description: Normalizado para minúsculas, com `trim`. Único.
+          example: joao@example.com
+        password:
+          type: string
+          format: password
+          minLength: 8
+          description: Entre 8 e 72 bytes UTF-8 (teto imposto pelo bcrypt).
+          example: senhaSuperSecreta
+        favorite_teams:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: |
+            Códigos de seleção do catálogo `GET /v1/teams`. Duplicatas são
+            ignoradas.
+          items:
+            type: string
+            example: BRA
+        accepted_terms:
+          type: boolean
+          description: Precisa ser `true` — aceite dos termos é obrigatório.
+          example: true
+
+    RegisterUserResponse:
+      type: object
+      description: |
+        Perfil recém-criado. Note que `favorite_teams` aqui é a lista de
+        **códigos**, enquanto em `GET /v1/users/me` são objetos completos.
+        A ordem das favoritas não é garantida.
+      required: [id, name, email, favorite_teams, terms_accepted_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1
+        name:
+          type: string
+          example: João da Silva
+        email:
+          type: string
+          format: email
+          example: joao@example.com
+        favorite_teams:
+          type: array
+          items:
+            type: string
+            example: BRA
+        terms_accepted_at:
+          type: string
+          format: date-time
+          description: |
+            Instante do aceite dos termos, em ISO 8601 **sem offset** — é o
+            horário local do servidor, não UTC.
+          example: '2026-08-31T14:14:03.722197'
+
+    MeResponse:
+      type: object
+      required: [id, name, email, favorite_teams, terms_accepted_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1
+        name:
+          type: string
+          example: João da Silva
+        email:
+          type: string
+          format: email
+          example: joao@example.com
+        favorite_teams:
+          type: array
+          description: Seleções favoritas, em ordem não garantida.
+          items:
+            $ref: '#/components/schemas/Team'
+        terms_accepted_at:
+          type: string
+          format: date-time
+          description: ISO 8601 sem offset (horário local do servidor).
+          example: '2026-08-31T14:14:03.000'
+
+    Team:
+      type: object
+      description: Seleção da Copa do Mundo.
+      required: [code, name, flag_url, primary_color]
+      properties:
+        code:
+          type: string
+          description: Código de três letras, em maiúsculas.
+          example: BRA
+        name:
+          type: string
+          example: Brazil
+        flag_url:
+          type: string
+          description: Caminho relativo da bandeira nesta própria API.
+          example: /flags/bra.png
+        primary_color:
+          type: string
+          description: |
+            Cor base da seleção em hexadecimal `#RRGGBB` maiúsculo, para o
+            cliente pintar card/tema. É a cor predominante do uniforme
+            titular e, quando ele é branco, a cor de destaque com que a
+            seleção é reconhecida. Única entre as seleções.
+          pattern: '^#[0-9A-F]{6}$'
+          example: '#FFDF00'
+
+    StickerStatus:
+      type: string
+      description: |
+        Estado da posição no álbum, derivado da quantidade que o usuário
+        possui: `missing` (0), `owned` (1), `repeated` (≥ 2).
+      enum: [missing, owned, repeated]
+
+    AlbumPosition:
+      type: object
+      description: Uma posição do álbum sob a ótica do usuário.
+      required: [code, number, status, repeated]
+      properties:
+        code:
+          type: string
+          description: |
+            Código da figurinha — `<SELEÇÃO>-<1..20>` nas de seleção; `00` ou
+            `FWC-<1..19>` nas especiais.
+          example: BRA-1
+        number:
+          type: integer
+          format: int32
+          description: |
+            Número da figurinha dentro da seleção (1..20), ou 0..19 nas
+            especiais.
+          example: 1
+        status:
+          $ref: '#/components/schemas/StickerStatus'
+        repeated:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            Unidades excedentes (`quantity - 1`). Vale 0 quando a posição está
+            `missing` ou tem exatamente uma unidade.
+          example: 0
+
+    TeamAlbumGroup:
+      type: object
+      description: Bloco do álbum com as 20 posições de uma seleção.
+      required: [team, stickers]
+      properties:
+        team:
+          $ref: '#/components/schemas/Team'
+        stickers:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlbumPosition'
+
+    AlbumResponse:
+      type: object
+      required: [teams, loose]
+      properties:
+        teams:
+          type: array
+          description: Grupos por seleção, ordenados pelo nome da seleção.
+          items:
+            $ref: '#/components/schemas/TeamAlbumGroup'
+        loose:
+          type: array
+          description: Figurinhas especiais avulsas, sem seleção dona.
+          items:
+            $ref: '#/components/schemas/AlbumPosition'
+
+    AlbumSummary:
+      type: object
+      required: [total, missing, repeated]
+      properties:
+        total:
+          type: integer
+          format: int32
+          description: Tamanho fixo do álbum.
+          example: 980
+        missing:
+          type: integer
+          format: int32
+          description: Posições ainda não possuídas pelo usuário.
+          example: 942
+        repeated:
+          type: integer
+          format: int32
+          description: Soma das unidades excedentes de todas as figurinhas.
+          example: 7
+
+    RecentSticker:
+      allOf:
+        - $ref: '#/components/schemas/AlbumPosition'
+        - type: object
+          required: [stuck_at, team]
+          properties:
+            stuck_at:
+              type: string
+              format: date-time
+              description: |
+                Instante da **primeira** colagem, em UTC (ISO 8601). Não é
+                reescrito quando a figurinha vira repetida.
+              example: '2026-08-31T17:14:21.000Z'
+            team:
+              description: |
+                Seleção dona da figurinha; `null` nas especiais avulsas.
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/Team'
+
+    RecentStickersResponse:
+      type: object
+      required: [stickers]
+      properties:
+        stickers:
+          type: array
+          maxItems: 10
+          description: Da mais recente para a mais antiga.
+          items:
+            $ref: '#/components/schemas/RecentSticker'
+
+    RegisterStickerRequest:
+      type: object
+      required: [code, quantity]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: |
+            Código da figurinha; espaços nas pontas, caixa e zeros à esquerda
+            no sufixo numérico são normalizados (`bra-001` alcança `BRA-1`).
+            Precisa existir no catálogo.
+          example: BRA-1
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Quantas unidades somar à posição.
+          example: 1
+
+    UpdateStickerRequest:
+      type: object
+      required: [code, quantity]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: |
+            Código da figurinha; espaços nas pontas, caixa e zeros à esquerda
+            no sufixo numérico são normalizados (`bra-001` alcança `BRA-1`).
+            Precisa existir no catálogo e já estar colada no álbum do usuário.
+          example: BRA-1
+        quantity:
+          type: integer
+          format: int32
+          minimum: 0
+          description: |
+            Quantidade final da posição (valor absoluto, não incremento).
+            Zero remove a figurinha do álbum.
+          example: 2
+
+    UpdateStickerResponse:
+      type: object
+      description: |
+        Posição resultante após o update. `status` é `missing` quando a
+        figurinha foi removida com `quantity: 0`.
+      required: [code, status, repeated]
+      properties:
+        code:
+          type: string
+          example: BRA-1
+        status:
+          $ref: '#/components/schemas/StickerStatus'
+        repeated:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Unidades excedentes após o update.
+          example: 1
+
+    RegisterStickerResponse:
+      type: object
+      description: |
+        Posição resultante após a colagem. `status` nunca é `missing` aqui.
+      required: [code, status, repeated]
+      properties:
+        code:
+          type: string
+          example: BRA-1
+        status:
+          $ref: '#/components/schemas/StickerStatus'
+        repeated:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Unidades excedentes após o registro.
+          example: 0
