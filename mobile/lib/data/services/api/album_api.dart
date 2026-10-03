@@ -13,7 +13,7 @@ abstract class AlbumApi {
   @GET('/v1/album/summary')
   Future<AlbumSummaryApiModel> getSummary();
 
-  @GET('/vi/album')
+  @GET('/v1/album')
   Future<AlbumApiModel> getAlbum({
     @Query('status') String? status,
     @Query('team') String? team,
