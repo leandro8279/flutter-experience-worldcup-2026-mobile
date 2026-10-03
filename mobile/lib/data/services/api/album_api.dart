@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:mobile/data/services/api/model/album/album_api_model.dart';
 import 'package:retrofit/retrofit.dart';
 import 'package:mobile/data/services/api/model/album/album_summary_api_model.dart';
 import 'package:mobile/data/services/api/model/album/recent_sticker_api_model.dart';
@@ -11,6 +12,12 @@ abstract class AlbumApi {
 
   @GET('/v1/album/summary')
   Future<AlbumSummaryApiModel> getSummary();
+
+  @GET('/vi/album')
+  Future<AlbumApiModel> getAlbum({
+    @Query('status') String? status,
+    @Query('team') String? team,
+  });
 
   @GET('/v1/album/recent')
   Future<RecentStickersApiModel> getRecent();
