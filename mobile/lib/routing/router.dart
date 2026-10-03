@@ -1,4 +1,5 @@
 import 'package:go_router/go_router.dart';
+import 'package:mobile/ui/album/album_bindings.dart';
 import 'package:mobile/ui/home/home_bindings.dart';
 import 'package:provider/provider.dart';
 import 'package:mobile/core/auth/auth_session_notifier.dart';
@@ -73,7 +74,8 @@ GoRouter router(AuthSessionNotifier session) => GoRouter(
           routes: [
             GoRoute(
               path: Routes.album,
-              builder: (context, state) => AlbumScreen(),
+              builder: (context, state) =>
+                  AlbumBindings(screenBuilder: (context) => AlbumScreen()),
             ),
           ],
         ),
