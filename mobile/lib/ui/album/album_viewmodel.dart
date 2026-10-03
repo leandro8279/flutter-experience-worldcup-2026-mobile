@@ -1,4 +1,16 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:mobile/core/command.dart';
+import 'package:mobile/core/logging/app_logger.dart';
+import 'package:mobile/core/result.dart';
+import 'package:mobile/core/view_model_initializable.dart';
+import 'package:mobile/data/repositories/album/album_repository.dart';
+import 'package:mobile/data/repositories/team/team_repository.dart';
+import 'package:mobile/domain/models/album/album.dart';
+import 'package:mobile/domain/models/album/album_position.dart';
+import 'package:mobile/domain/models/album/album_summary.dart';
+import 'package:mobile/domain/models/album/sticker_status.dart';
+import 'package:mobile/domain/models/team/team.dart';
+import 'package:mobile/ui/core/theme/theme.dart';
 
 typedef AlbumStickerView = ({
   String code,
@@ -9,4 +21,191 @@ typedef AlbumStickerView = ({
   int count,
 });
 
-class AlbumViewModel extends ChangeNotifier {}
+typedef AlbumSectionView = ({
+  String name,
+  String? flagPath,
+  Color color,
+  String progress,
+  List<AlbumStickerView> stickers,
+});
+
+class AlbumViewModel({
+  required final AlbumRepository _albumRepository,
+  required final TeamRepository _teamRepository,
+}) extends ChangeNotifier implements ViewModelInitializable {
+  final _log = AppLogger('AlbumViewModel');
+
+  late final loadAlbum = Command0(_loadAlbum);
+  late final loadTeams = Command0(_loadTeams);
+  late final loadSummary = Command0(_loadSummary);
+
+  Album? _album;
+  List<Team> _teams = const [];
+  AlbumSummary? _counts;
+  StickerStatus? _status;
+  String? _teamCode;
+
+  List<Team> get teams => _teams;
+  AlbumSummary? get counts => _counts;
+  StickerStatus? get status => _status;
+  String? get teamCode => _teamCode;
+
+  bool get filtered => _status != null || _teamCode != null;
+
+  @override
+  void init() {
+    loadAlbum.execute();
+    loadTeams.execute();
+    loadSummary.execute();
+  }
+
+  void selectedStatus(StickerStatus? status) {
+    if (status == _status) return;
+    _status = status;
+    _reload();
+  }
+
+  void toggleTeam(String code) {
+    _teamCode = code == _teamCode ? null : code;
+    _reload();
+  }
+
+  void _reload() {
+    notifyListeners();
+    loadAlbum.execute();
+  }
+
+  Future<void> refresh() => Future.wait([
+    loadAlbum.execute(),
+    loadTeams.execute(),
+    loadSummary.execute(),
+  ]);
+
+  List<AlbumSectionView> sectionsMatching(String term) {
+    final album = _album;
+    if (album == null) return const [];
+
+    final query = term.trim().toLowerCase();
+    final searching = query.isNotEmpty;
+
+    final counted = filtered || searching;
+
+    return [
+      for (final group in album.teams)
+        _sectionOf(
+          name: group.team.name,
+          flagPath: group.team.flagUrl,
+          color: Color(group.team.primaryColor),
+          positions: group.stickers,
+          query: query,
+          counted: counted,
+        ),
+      if (album.loose.isNotEmpty)
+        _sectionOf(
+          name: 'ESPECIAIS',
+          flagPath: null,
+          color: AppColors.ink,
+          positions: album.loose,
+          query: query,
+          counted: counted,
+        ),
+    ].nonNulls.toList();
+  }
+
+  AlbumSectionView? _sectionOf({
+    required String name,
+    required String? flagPath,
+    required Color color,
+    required List<AlbumPosition> positions,
+    required String query,
+    required bool counted,
+  }) {
+    final matched = query.isEmpty || name.toLowerCase().contains(query)
+        ? positions
+        : [
+            for (final position in positions)
+              if (position.code.toLowerCase().contains(query)) position,
+          ];
+
+    if (matched.isEmpty) return null;
+    return (
+      name: name,
+      flagPath: flagPath,
+      color: color,
+      progress: counted
+          ? matched.length == 1
+                ? '1 Item'
+                : '${matched.length} itens'
+          : '${matched.where(isCollected).length} / ${matched.length}',
+      stickers: [
+        for (final position in matched)
+          _stickerOf(position, especial: flagPath == null),
+      ],
+    );
+  }
+
+  AlbumStickerView _stickerOf(
+    AlbumPosition position, {
+    required bool especial,
+  }) {
+    final collected = isCollected(position);
+    return (
+      code: position.code,
+      number: position.number,
+      label: position.code.split('-').first,
+      collected: collected,
+      count: collected ? position.repeated + 1 : 0,
+      player: '${especial ? 'ESPECIAL' : 'JOGADOR'} ${position.number}',
+    );
+  }
+
+  bool isCollected(AlbumPosition position) =>
+      position.status != StickerStatus.missing;
+
+  Future<Result<void>> _loadAlbum() async {
+    final album = await _albumRepository.getAlbum(
+      status: _status,
+      team: _teamCode,
+    );
+
+    switch (album) {
+      case Ok<Album>(:final value):
+        _album = value;
+        _log.debug(
+          '${value.teams.length} seleções e ${value.loose.length} especiais '
+          '(status: ${status?.name ?? 'Todas'}, seleção: ${_teamCode ?? 'Todas'})',
+        );
+        return Result.done;
+      case Error<Album>(:final error):
+        _log.error(
+          'Falha ao carregar o album',
+          error: error,
+          stackTrace: error.stackTrace,
+        );
+        return Result.error(error);
+    }
+  }
+
+  Future<Result<void>> _loadTeams() async {
+    final teams = await _teamRepository.getTeams();
+
+    switch (teams) {
+      case Ok<List<Team>>(:final value):
+        _teams = value;
+        return Result.done;
+      case Error<List<Team>>(:final error):
+        return Result.error(error);
+    }
+  }
+
+  Future<Result<void>> _loadSummary() async {
+    final summary = await _albumRepository.getSummary();
+    switch (summary) {
+      case Ok<AlbumSummary>(:final value):
+        _counts = value;
+        return Result.done;
+      case Error<AlbumSummary>(:final error):
+        return Result.error(error);
+    }
+  }
+}
