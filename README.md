@@ -2,8 +2,6 @@
 
 Aplicativo mobile em Flutter para acompanhar um álbum de figurinhas da Copa do Mundo de 2026. O repositório contém telas de autenticação e de coleção, integração com uma API HTTP e um artefato de backend com banco SQLite.
 
-> **Atenção de segurança:** este repositório é público e `backend/.env` está versionado no Git. Trate os valores desse arquivo como expostos. Não os reutilize; rotacione `JWT_SECRET` e outras credenciais aplicáveis e remova o arquivo do histórico do repositório antes de distribuir o projeto. Nenhum valor desse arquivo é reproduzido aqui.
-
 ## Índice
 
 - [Sobre o projeto](#sobre-o-projeto)
