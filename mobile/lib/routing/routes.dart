@@ -4,9 +4,15 @@ final class Routes._() {
   static const login = '/auth/login';
   static const authRegister = '/auth/register';
   static const home = '/home';
-  static const public = {splash, welcome, login, authRegister};
 
   static const album = '/album';
   static const trades = '/trades';
   static const more = '/more';
+
+  static const stickerPath = '/sticker/:code';
+  static const stickerRegister = '/sticker/register';
+
+  static String sticker(String code) => '/sticker/$code';
+
+  static const public = {splash, welcome, login, authRegister};
 }
